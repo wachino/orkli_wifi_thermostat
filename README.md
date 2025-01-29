@@ -2,6 +2,11 @@
 
 This custom integration allows you to control and monitor the Mi Orkli Wi-Fi Thermostat (Model TERMOWIFI TW501B) in Home Assistant. With this integration, you can manage your thermostat directly from your Home Assistant dashboard, create automations, and monitor your heating system's status.
 
+
+![termostato-on](https://github.com/user-attachments/assets/b5dc8e05-227a-4cc0-9995-57b5241ce21b)
+![termostato-off](https://github.com/user-attachments/assets/a6957119-6c36-4020-884a-00f15f5d293d)
+
+
 ---
 
 ## Features
@@ -16,17 +21,17 @@ This custom integration allows you to control and monitor the Mi Orkli Wi-Fi The
 
 ### HACS (Home Assistant Community Store)
 1. Go to the HACS section in your Home Assistant.
-2. Click on **Integrations**.
-3. Click the three dots in the top-right corner and select **Custom repositories**.
-4. Add this repository URL: `https://github.com/wachino/orkli_wifi_thermostat`.
-5. Search for "Mi Orkli Thermostat" and install the integration.
-6. Restart Home Assistant.
+1. Click on **Integrations**.
+1. Click the three dots in the top-right corner and select **Custom repositories**.
+1. Add this repository URL: `https://github.com/wachino/orkli_wifi_thermostat`.
+1. Search for "Mi Orkli Thermostat" and install the integration.
+1. Restart Home Assistant.
 
 ### Manual Installation
 1. Download the `mi_orkli_thermostat` folder from this repository.
-2. Copy the folder to the `custom_components` directory in your Home Assistant configuration.
-3. Restart Home Assistant.
-4. Add the integration via the Home Assistant UI:
+1. Copy the folder to the `custom_components` directory in your Home Assistant configuration.
+1. Restart Home Assistant.
+1. Add the integration via the Home Assistant UI:
    - Go to **Settings > Devices & Services > Integrations**.
    - Click **Add Integration** and search for "Mi Orkli Thermostat".
    - Follow the setup instructions.
@@ -36,9 +41,23 @@ This custom integration allows you to control and monitor the Mi Orkli Wi-Fi The
 ## Configuration
 After installing the integration, add your Mi Orkli Thermostat to Home Assistant using the following steps:
 1. Go to **Settings > Devices & Services > Integrations**.
-2. Click **Add Integration** and search for "Mi Orkli Thermostat".
-3. Enter your thermostat's IP address and any required credentials.
-4. Click **Submit** to complete the setup.
+1. Click **Add Integration** and search for "Mi Orkli Thermostat".
+1. Enter your thermostat's IP address and any required credentials.
+1. Click **Submit** to complete the setup.
+
+---
+
+## Visualization
+
+By using this integration you can create a dashboard to look like:
+![dashboard](https://github.com/user-attachments/assets/127b6032-7bbe-4051-a30d-25e0b9f2d900)
+
+Where each widget will show the temperature and humidity:
+![dashboard-widget](https://github.com/user-attachments/assets/1483b408-8c31-4d5a-ba0c-4ecbc2e69b55)
+
+Additionally you can look for the humidity and temperature history:
+![dashboard-temp-history](https://github.com/user-attachments/assets/58235611-5500-45c2-9a59-df7feca8514a)
+![dashboard-humidity](https://github.com/user-attachments/assets/4bfdddc3-76e1-4dd1-81c9-70dd35e5d630)
 
 ---
 
@@ -54,8 +73,8 @@ Once configured, the thermostat will appear as an entity in Home Assistant. You 
 ## Contributing
 Contributions are welcome! If you'd like to contribute, please:
 1. Fork the repository.
-2. Create a new branch for your feature or bugfix.
-3. Submit a pull request.
+1. Create a new branch for your feature or bugfix.
+1. Submit a pull request.
 
 ---
 
