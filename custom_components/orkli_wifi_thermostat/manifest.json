@@ -1,0 +1,14 @@
+{
+  "domain": "orkli_wifi_thermostat",
+  "name": "Orkli Wifi Thermostat",
+  "codeowners": ["@wachino"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/wachino/orkli_wifi_thermostat",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/wachino/orkli_wifi_thermostat/issues",
+  "loggers": ["custom_components.orkli_wifi_thermostat"],
+  "requirements": ["ftputil==5.1.0"],
+  "single_config_entry": false,
+  "version": "1.0.0"
+}
