@@ -1,5 +1,7 @@
 # Home Assistant Custom Integration for Mi Orkli Wi-Fi Thermostat (TERMOWIFI TW501B)
 
+_Please, notice: **This is NOT an official integration**._
+
 This custom integration allows you to control and monitor the Mi Orkli Wi-Fi Thermostat (Model TERMOWIFI TW501B) in Home Assistant. With this integration, you can manage your thermostat directly from your Home Assistant dashboard, create automations, and monitor your heating system's status.
 
 
