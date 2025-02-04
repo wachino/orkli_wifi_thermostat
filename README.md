@@ -13,7 +13,6 @@ This custom integration allows you to control and monitor the Orkli Wi-Fi Thermo
 
 ## Features
 - **Thermostat Control**: Set and adjust the target temperature.
-- **Mode Selection**: Switch between heating modes (e.g., Comfort, Eco, Anti-freeze).
 - **Real-Time Monitoring**: View current temperature, humidity, and thermostat status.
 - **Automation Support**: Integrate with other Home Assistant devices and services for advanced automation.
 
