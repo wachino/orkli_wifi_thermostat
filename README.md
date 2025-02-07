@@ -20,30 +20,28 @@ This custom integration allows you to control and monitor the Orkli Wi-Fi Thermo
 
 ## Installation
 
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=wachino&category=Integration&repository=https%3A%2F%2Fgithub.com%2Fwachino%2Forkli_wifi_thermostat)
+
 ### HACS (Home Assistant Community Store)
 1. Go to the HACS section in your Home Assistant.
 1. Click on **Integrations**.
 1. Click the three dots in the top-right corner and select **Custom repositories**.
 1. Add this repository URL: `https://github.com/wachino/orkli_wifi_thermostat`.
-1. Search for "Mi Orkli Thermostat" and install the integration.
+1. Search for "Orkli Wifi Thermostat" and install the integration.
 1. Restart Home Assistant.
 
 ### Manual Installation
 1. Download the `orkli_wifi_thermostat` folder from this repository.
 1. Copy the folder to the `custom_components` directory in your Home Assistant configuration.
 1. Restart Home Assistant.
-1. Add the integration via the Home Assistant UI:
-   - Go to **Settings > Devices & Services > Integrations**.
-   - Click **Add Integration** and search for "Mi Orkli Thermostat".
-   - Follow the setup instructions.
 
 ---
 
 ## Configuration
-After installing the integration, add your Mi Orkli Thermostat to Home Assistant using the following steps:
+After installing the integration, add your Orkli Wifi Thermostat to Home Assistant using the following steps:
 1. Go to **Settings > Devices & Services > Integrations**.
-1. Click **Add Integration** and search for "Mi Orkli Thermostat".
-1. Enter your thermostat's IP address and any required credentials.
+1. Click **Add Integration** and search for "Orkli Wifi Thermostat".
+1. Enter your thermostat's IP address and the required credentials.
 1. Click **Submit** to complete the setup.
 
 ---
@@ -66,7 +64,6 @@ Additionally you can look for the humidity and temperature history:
 Once configured, the thermostat will appear as an entity in Home Assistant. You can:
 - View the current temperature and humidity.
 - Adjust the target temperature.
-- Switch between heating modes.
 - Create automations using the thermostat's state and attributes.
 
 ---
