@@ -1,0 +1,10 @@
+{
+  "exceptions": {
+    "zone_power_failed": {
+      "message": "No se pudo enviar la orden de encendido o apagado de la zona {name}."
+    },
+    "unsupported_hvac_mode": {
+      "message": "No se puede seleccionar {mode} para {name}. Esta zona solo se puede activar en su modo conocido o apagar; no permite cambiar el modo de calefacción o refrigeración del sistema."
+    }
+  }
+}

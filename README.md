@@ -66,6 +66,24 @@ Once configured, the thermostat will appear as an entity in Home Assistant. You 
 - Adjust the target temperature.
 - Create automations using the thermostat's state and attributes.
 
+### Zone power and HVAC mode
+
+The climate entities support `climate.turn_on` and `climate.turn_off` using the
+existing zone power command. Turning a zone on preserves its heating/cooling
+mode; it does not select the central system's mode.
+
+`climate.set_hvac_mode` accepts `off` and the zone's currently cached `heat` or
+`cool` mode. Selecting that known mode enables the zone. The opposite mode is
+rejected because this integration has no verified command for changing it.
+The mode list follows the cached device mode. If that mode is unknown, direct
+on/off commands still work without guessing a heating/cooling mode.
+
+An accepted send is not a device acknowledgement: the displayed state changes
+when device feedback arrives. Failed power commands raise an action error.
+Stored climate states no longer overwrite coordinator power or mode at startup.
+See [the climate control review](docs/climate-control-review.md) for examples,
+compatibility notes, and offline validation limits.
+
 ---
 
 ## Contributing
@@ -73,6 +91,25 @@ Contributions are welcome! If you'd like to contribute, please:
 1. Fork the repository.
 1. Create a new branch for your feature or bugfix.
 1. Submit a pull request.
+
+### Offline stability and climate tests
+
+From the repository root, run with Python 3.10 or newer:
+
+```bash
+python3 -B -m unittest discover -s tests -v
+```
+
+The tests use only the Python standard library and fake sockets. They do not
+require Home Assistant, credentials, or a thermostat connection. Coverage includes
+fragmentation, concatenated frames, noise, invalid checksums, resynchronization,
+connection retries, concurrent callers, timeouts, cancellation, integration
+unloading, climate action hooks, and exact command bytes. A deterministic
+execution budget catches non-yielding receiver loops without hanging the test
+runner. Climate tests use Home Assistant stand-ins, not a running instance.
+
+See [the TCP parser review](docs/tcp-parser-review.md) for the patch scope,
+validation results, connection lifecycle behavior, and remaining limitations.
 
 ---
 

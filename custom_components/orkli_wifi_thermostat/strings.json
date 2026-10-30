@@ -26,6 +26,14 @@
       }
     }
   },
+  "exceptions": {
+    "zone_power_failed": {
+      "message": "Failed to send the zone power command for {name}."
+    },
+    "unsupported_hvac_mode": {
+      "message": "Cannot select {mode} for {name}. This zone can only be enabled in its currently known mode or turned off; it cannot change the system's heating/cooling mode."
+    }
+  },
   "options": {
     "step": {
       "init": {
