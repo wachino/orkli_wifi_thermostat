@@ -10,12 +10,13 @@ from homeassistant.components.climate import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .api import Device
+from .api import APIConnectionError, Device
 from .const import DOMAIN
 from .coordinator import OrkliCoordinator
 
@@ -48,9 +49,13 @@ class ExampleClimate(CoordinatorEntity, ClimateEntity, RestoreEntity):
     # _unrecorded_attributes = ["target_temperature_high", "target_temperature_low"]
 
     @property
-    def supported_features(self) -> int:
+    def supported_features(self) -> ClimateEntityFeature:
         """Return the list of supported features."""
-        return ClimateEntityFeature.TARGET_TEMPERATURE
+        return (
+            ClimateEntityFeature.TARGET_TEMPERATURE
+            | ClimateEntityFeature.TURN_ON
+            | ClimateEntityFeature.TURN_OFF
+        )
 
     def __init__(self, coordinator: OrkliCoordinator, device: Device) -> None:
         """Initialise sensor."""
@@ -67,19 +72,21 @@ class ExampleClimate(CoordinatorEntity, ClimateEntity, RestoreEntity):
 
     @property
     def hvac_modes(self) -> list[HVACMode]:
-        """Return the list of available hvac operation modes."""
-        return [HVACMode.OFF, HVACMode.COOL, HVACMode.HEAT]
+        """Offer zone power control in the device's currently cached mode."""
+        mode = self._device_hvac_mode
+        return [HVACMode.OFF, mode] if mode is not None else [HVACMode.OFF]
 
     @property
-    def hvac_mode(self) -> HVACMode:
+    def _device_hvac_mode(self) -> HVACMode | None:
+        """Map the existing mode interpretation without selecting a new mode."""
+        return {0: HVACMode.HEAT, 1: HVACMode.COOL}.get(self.device.mode)
+
+    @property
+    def hvac_mode(self) -> HVACMode | None:
         """Return the current operation mode."""
         if not self.device.on:
             return HVACMode.OFF
-        match self.device.mode:
-            case 0:
-                return HVACMode.HEAT
-            case 1:
-                return HVACMode.COOL
+        return self._device_hvac_mode
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -177,16 +184,8 @@ class ExampleClimate(CoordinatorEntity, ClimateEntity, RestoreEntity):
                 if previous_state.attributes.get("temperature") is not None
                 else None
             )
-            self.device.on = (
-                previous_state.state is not None
-                and previous_state.state != HVACMode.OFF
-            )
-            self.device.mode = (
-                0
-                if previous_state.state is not None
-                and previous_state.state == HVACMode.HEAT
-                else 1
-            )
+            # Power and mode belong to coordinator data. A saved climate state
+            # may describe a different season or predate a live device update.
 
     async def async_set_temperature(self, **kwargs):
         """Set new target temperature."""
@@ -194,17 +193,40 @@ class ExampleClimate(CoordinatorEntity, ClimateEntity, RestoreEntity):
             self.device, kwargs.get("temperature")
         )
 
-    async def async_handle_set_hvac_mode_service(self, hvac_mode: str):
-        """Handle the service call."""
-        _LOGGER.debug("Set HVAC Mode: %s", hvac_mode)
-        if hvac_mode == HVACMode.OFF:
-            self.device.on = False
-        else:
-            self.device.on = True
-            self.device.mode = 0 if hvac_mode == HVACMode.HEAT else 1
-        await self.coordinator.async_send_toggle_command(
-            self.device, hvac_mode != HVACMode.OFF
-        )
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        """Enable or disable the zone without changing its heat/cool mode."""
+        if hvac_mode not in self.hvac_modes:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="unsupported_hvac_mode",
+                translation_placeholders={"name": self.name, "mode": str(hvac_mode)},
+            )
+        await self._async_set_zone_power(hvac_mode != HVACMode.OFF)
+
+    async def async_turn_on(self) -> None:
+        """Enable the zone using its existing mode, including an unknown mode."""
+        await self._async_set_zone_power(True)
+
+    async def async_turn_off(self) -> None:
+        """Disable the zone without changing its stored mode."""
+        await self._async_set_zone_power(False)
+
+    async def _async_set_zone_power(self, on: bool) -> None:
+        """Send the existing power command and let telemetry confirm state."""
+        try:
+            sent = await self.coordinator.async_send_toggle_command(self.device, on)
+        except (APIConnectionError, OSError) as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="zone_power_failed",
+                translation_placeholders={"name": self.name},
+            ) from err
+        if not sent:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="zone_power_failed",
+                translation_placeholders={"name": self.name},
+            )
 
     @property
     def unique_id(self) -> str:
