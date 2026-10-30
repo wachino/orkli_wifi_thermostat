@@ -30,6 +30,10 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         patcher = patch.object(asyncio.get_running_loop(), "sock_connect", self.connect_mock)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.sendall_mock = AsyncMock()
+        patcher = patch.object(asyncio.get_running_loop(), "sock_sendall", self.sendall_mock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     async def asyncTearDown(self):
         # Also clean up legacy receivers after a deliberately failing regression.
@@ -309,13 +313,41 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(api, "POLL_INTERVAL", 0):
             await self.client.async_connect()
             receiver = self.client._task
-            self.sockets[0].send.return_value = 0
+            self.sendall_mock.side_effect = ConnectionResetError()
             self.assertFalse(await self.client.async_send_command(api.Packet(TEMPERATURE)))
             await self.until(reconnected)
             await self.client.async_connect()
-        self.sockets[0].send.assert_called_once_with(TEMPERATURE)
+        self.sendall_mock.assert_awaited_once_with(self.sockets[0], TEMPERATURE)
+        self.sockets[0].send.assert_not_called()
         self.assertIs(self.client._task, receiver)
         self.assertTrue(self.client.connected)
+
+    async def test_shutdown_cleans_up_a_write_awaited_by_receiver_callback(self):
+        entered, cleaned, never = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def send(sock, message):
+            entered.set()
+            try:
+                await never.wait()
+            finally:
+                cleaned.set()
+
+        async def connect(sock, address):
+            sock.recv.side_effect = [TEMPERATURE]
+
+        async def callback(packet):
+            await self.client.async_send_command(api.Packet(TARGET))
+
+        self.client.message_callback = callback
+        self.connect_mock.side_effect = connect
+        self.sendall_mock.side_effect = send
+        await self.client.async_connect()
+        receiver = self.client._task
+        await self.until(entered)
+        await asyncio.wait_for(self.client.async_disconnect(), timeout=1)
+        self.assertTrue(cleaned.is_set())
+        self.assertTrue(receiver.cancelled())
+        self.sockets[0].close.assert_called_once()
 
     async def test_reconnection_discards_fragment_from_previous_socket(self):
         received = asyncio.Event()

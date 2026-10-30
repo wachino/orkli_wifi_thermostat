@@ -1,6 +1,8 @@
 # Estabilidad TCP: parser, reconexión y cierre
 
 Descripción de las correcciones de recepción TCP, reconexión y cierre.
+La evolución posterior del transporte de escritura se describe en
+[la revisión de envíos TCP](tcp-write-review.md).
 
 ## Base y rama de trabajo
 

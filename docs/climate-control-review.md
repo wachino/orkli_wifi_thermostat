@@ -4,6 +4,8 @@ Cambios de la rama `fix/tcp-and-climate`, sobre la base
 `6a4c9d8eaca7c3551f2647a3944809e265990151`. Incluye las correcciones TCP ya
 preparadas. El usuario ha comunicado que su prueba manual en Home Assistant
 parece funcionar correctamente. La validación automática usa un entorno simulado.
+La evolución posterior del transporte, conservando los mismos paquetes, se
+describe en [la revisión de envíos TCP](tcp-write-review.md).
 
 ## Comportamiento
 
