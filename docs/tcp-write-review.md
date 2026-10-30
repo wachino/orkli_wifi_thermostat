@@ -68,8 +68,8 @@ contra dispositivos, ni se ejecuta una instancia completa de Home Assistant.
 
 Se comprueba que `coordinator.py`, `climate.py` y la clase `Packet` mantienen su
 código respecto a la base. Las pruebas de bytes literales para encendido,
-apagado y temperatura siguen pasando. La versión del manifiesto no cambia:
-publicar una nueva release es un paso posterior a la revisión.
+apagado y temperatura siguen pasando. El manifiesto prepara la versión `1.1.1`;
+publicar la release `v1.1.1` es un paso posterior a la revisión y fusión de la PR.
 
 El contrato de `sock_sendall()` está documentado en la
 [referencia de Python 3.12](https://docs.python.org/3.12/library/asyncio-eventloop.html#asyncio.loop.sock_sendall).
