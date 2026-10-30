@@ -9,6 +9,7 @@ from ftplib import FTP
 
 _LOGGER = logging.getLogger(__name__)
 CONNECT_TIMEOUT = 10.0
+SEND_TIMEOUT = 10.0
 RECONNECT_DELAY = 5.0
 POLL_INTERVAL = 1.0
 
@@ -256,7 +257,20 @@ class PushAPI(API):
         self._task: asyncio.Task | None = None
         self._connect_task: asyncio.Task | None = None
         self._connect_lock = asyncio.Lock()
+        self._send_task: asyncio.Task | None = None
+        self._send_lock = asyncio.Lock()
         self._stopping = False
+
+    def _cancel_pending_send(self) -> None:
+        """Cancel a write once, leaving its caller to await I/O cleanup."""
+        task, self._send_task = self._send_task, None
+        if task is not None:
+            task.cancel()
+
+    def disconnect(self) -> bool:
+        """Abort any write belonging to the connection being closed."""
+        self._cancel_pending_send()
+        return super().disconnect()
 
     async def async_connect(self) -> bool:
         """Share a connection attempt and keep exactly one receiver alive."""
@@ -282,32 +296,38 @@ class PushAPI(API):
 
     async def _async_open_connection(self) -> None:
         """Open a nonblocking socket; publish it only after connection succeeds."""
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setblocking(False)
-            loop = asyncio.get_running_loop()
-            await asyncio.wait_for(
-                loop.sock_connect(sock, (self.host, 12345)), timeout=CONNECT_TIMEOUT
-            )
+        # Finish the old write's I/O cleanup before an OS socket fd can be reused.
+        # Senders connect before acquiring this lock, avoiding lock inversion.
+        async with self._send_lock:
             if self._stopping:
                 raise APIConnectionError("API has been shut down")
-            self._packet_parser.reset()
-            self.socket = sock
-            self.connected = True
-        except (OSError, asyncio.TimeoutError) as ex:
-            raise APIConnectionError(f"Error connecting to {self.host}:12345") from ex
-        finally:
-            if sock is not None and self.socket is not sock:
-                try:
-                    sock.close()
-                except OSError:
-                    _LOGGER.debug("Error closing unpublished socket", exc_info=True)
+            sock = None
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setblocking(False)
+                loop = asyncio.get_running_loop()
+                await asyncio.wait_for(
+                    loop.sock_connect(sock, (self.host, 12345)), timeout=CONNECT_TIMEOUT
+                )
+                if self._stopping:
+                    raise APIConnectionError("API has been shut down")
+                self._packet_parser.reset()
+                self.socket = sock
+                self.connected = True
+            except (OSError, asyncio.TimeoutError) as ex:
+                raise APIConnectionError(f"Error connecting to {self.host}:12345") from ex
+            finally:
+                if sock is not None and self.socket is not sock:
+                    try:
+                        sock.close()
+                    except OSError:
+                        _LOGGER.debug("Error closing unpublished socket", exc_info=True)
 
     async def async_disconnect(self) -> bool:
         """Stop permanently, cancel pending work, and wait for its cleanup."""
         self._stopping = True
         receiver = self._task
+        writer = self._send_task
         current = asyncio.current_task()
         pending = [
             task for task in (self._connect_task, receiver)
@@ -316,8 +336,12 @@ class PushAPI(API):
         for task in pending:
             task.cancel()
         self.disconnect()
+        if writer is not None and writer is not current:
+            pending.append(writer)
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+        async with self._send_lock:
+            pass  # Drain the active sender and reject waiters on the old socket.
         if self._task is receiver:
             self._task = None
         return True
@@ -375,23 +399,51 @@ class PushAPI(API):
             if self._task is asyncio.current_task():
                 self._task = None
 
-    async def async_send_command(self, command: Packet) -> bool:
-        """Send a command to a device."""
+    async def _async_send_bytes(self, sock: socket.socket, message: bytes) -> None:
+        """Bound the write; success means socket delivery, not device execution."""
+        loop = asyncio.get_running_loop()
+        await asyncio.wait_for(loop.sock_sendall(sock, message), timeout=SEND_TIMEOUT)
 
+    async def async_send_command(self, command: Packet) -> bool:
+        """Serialize a complete frame on one connection without replaying it."""
         if not self.connected:
             await self.async_connect()
-        try:
-            _LOGGER.debug("Sending command: %s", command)
-            s = self.socket.send(command.message)
-            if s != 7:
-                _LOGGER.error("Length error sending command: %s", command)
-                self.disconnect()
+        sock = self.socket
+        async with self._send_lock:
+            if self._stopping or not self.connected or self.socket is not sock:
                 return False
-            return True
-        except Exception as e:
-            _LOGGER.error("Error sending command: %s", e)
-            self.disconnect()
-            return False
+            _LOGGER.debug("Sending command: %s", command)
+            writer = asyncio.create_task(self._async_send_bytes(sock, command.message))
+            self._send_task = writer
+            finished = asyncio.get_running_loop().create_future()
+            writer.add_done_callback(finished.set_result)
+            try:
+                # Internal disconnect cancels the writer, not the action's caller.
+                # Shielding this completion signal preserves caller cancellation.
+                await asyncio.shield(finished)
+                sent = not writer.cancelled()
+                if sent:
+                    writer.result()
+                if not sent or self._stopping or not self.connected or self.socket is not sock:
+                    if self.socket is sock:
+                        self.disconnect()
+                    return False
+                return True
+            except asyncio.CancelledError:
+                if self._send_task is writer:
+                    self._cancel_pending_send()
+                if self.socket is sock:
+                    self.disconnect()
+                await asyncio.gather(writer, return_exceptions=True)
+                raise
+            except Exception as err:
+                _LOGGER.error("Error sending command (%s): %s", type(err).__name__, err)
+                if self.socket is sock:
+                    self.disconnect()
+                return False
+            finally:
+                if self._send_task is writer:
+                    self._send_task = None
 
 
 class APIAuthError(Exception):

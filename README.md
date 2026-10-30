@@ -84,6 +84,19 @@ Stored climate states no longer overwrite coordinator power or mode at startup.
 See [the climate control review](docs/climate-control-review.md) for examples,
 compatibility notes, and offline validation limits.
 
+### TCP writes
+
+Commands are serialized and sent with `loop.sock_sendall()` on nonblocking
+sockets, with a ten-second write timeout. Short writes and temporary socket
+backpressure no longer discard the rest of a frame. A failed, timed-out, or
+cancelled write closes that connection without automatically replaying the
+command; commands queued on the closed connection are also rejected.
+
+A successful send confirms delivery to the local socket, not execution by the
+thermostat. The protocol bytes are unchanged. See
+[the TCP write review](docs/tcp-write-review.md) for cancellation, reconnect,
+and test details.
+
 ---
 
 ## Contributing
@@ -107,6 +120,8 @@ connection retries, concurrent callers, timeouts, cancellation, integration
 unloading, climate action hooks, and exact command bytes. A deterministic
 execution budget catches non-yielding receiver loops without hanging the test
 runner. Climate tests use Home Assistant stand-ins, not a running instance.
+Write tests also exercise the real asyncio send-all implementation with a local
+Unix socket pair that forces short writes; no TCP connection to hardware is made.
 
 See [the TCP parser review](docs/tcp-parser-review.md) for the patch scope,
 validation results, connection lifecycle behavior, and remaining limitations.
