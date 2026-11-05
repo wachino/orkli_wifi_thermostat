@@ -110,8 +110,8 @@ class ExampleClimate(CoordinatorEntity, ClimateEntity, RestoreEntity):
         return self.device.name
 
     @property
-    def current_temperature(self) -> float | None:
-        """Return the state of the entity."""
+    def native_current_temperature(self) -> float | None:
+        """Return the current temperature in Celsius."""
         return (
             (162.0 - float(self.device.current_temperature)) / 2.0
             if self.device.current_temperature is not None
@@ -119,8 +119,8 @@ class ExampleClimate(CoordinatorEntity, ClimateEntity, RestoreEntity):
         )
 
     @property
-    def target_temperature(self) -> float | None:
-        """Return the target temperature."""
+    def native_target_temperature(self) -> float | None:
+        """Return the target temperature in Celsius."""
         return (
             float(self.device.target_temperature) / 2.0
             if self.device.target_temperature is not None
@@ -137,9 +137,15 @@ class ExampleClimate(CoordinatorEntity, ClimateEntity, RestoreEntity):
         )
 
     @property
-    def temperature_unit(self) -> str:
-        """Return unit of temperature."""
+    def native_temperature_unit(self) -> str:
+        """Return the thermostat's temperature unit."""
         return UnitOfTemperature.CELSIUS
+
+    # Older Home Assistant releases still read the legacy properties.
+    if not hasattr(ClimateEntity, "native_temperature_unit"):
+        temperature_unit = native_temperature_unit
+        current_temperature = native_current_temperature
+        target_temperature = native_target_temperature
 
     @property
     def min_temp(self) -> float:
