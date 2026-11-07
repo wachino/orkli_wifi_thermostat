@@ -5,7 +5,8 @@ import errno
 import logging
 import socket
 import io
-from ftplib import FTP
+from ftplib import FTP, all_errors, error_perm
+from uuid import uuid4
 
 _LOGGER = logging.getLogger(__name__)
 CONNECT_TIMEOUT = 10.0
@@ -99,11 +100,52 @@ class Device:
     icon: int
     dato1: int
     dato2: int
-    current_temperature: int | None
-    target_temperature: int | None
+    current_temperature: int | float | None
+    target_temperature: int | float | None
     current_humidity: int | None
-    mode: int
-    on: bool
+    mode: int | None
+    on: bool | None
+    device_registry_id: str | None = None
+
+    @property
+    def is_thermostat(self) -> bool:
+        """Type 49 output 9 is ventilation in TERMOWIFI installations."""
+        return self.type == 49 and self.device_id != 9
+
+    @property
+    def has_valid_zone_address(self) -> bool:
+        """Check that the address and all zone registers fit in a frame."""
+        return 0 <= self.address < 255 and 0 <= self.device_id <= 63
+
+
+def configured_devices(records: list[dict], host: str, entry_id: str) -> list[Device]:
+    """Load usable saved zones while preserving existing registry identifiers."""
+    devices = {}
+    entity_ids = set()
+    registry_ids = set()
+    for record in records:
+        device = Device(**record)
+        if not device.is_thermostat:
+            continue
+        if not device.has_valid_zone_address:
+            _LOGGER.warning("Skipping saved Orkli zone with an invalid address or output")
+            continue
+        key = (device.address, device.device_id)
+        if key in devices:
+            continue
+
+        fallback_id = f"{entry_id}_{device.address}_{device.device_id}"
+        if device.device_unique_id in entity_ids:
+            device.device_unique_id = fallback_id
+        if device.device_registry_id is None:
+            device.device_registry_id = f"{host.replace('.', '_')}-{device.device_id}"
+        if device.device_registry_id in registry_ids:
+            device.device_registry_id = fallback_id
+
+        entity_ids.add(device.device_unique_id)
+        registry_ids.add(device.device_registry_id)
+        devices[key] = device
+    return list(devices.values())
 
 
 class API:
@@ -168,61 +210,56 @@ class API:
             current_temperature=None,
             current_humidity=None,
             target_temperature=None,
-            mode=0,
-            on=False,
+            mode=None,
+            on=None,
         )
 
     def get_initial_devices(self) -> list[Device]:
-        ("""Get devices on api.""",)
-        newDevice: Device
-        devices: list[Device] = []
-        ftpServer = "85.152.52.212"
-        ftpPort = 21
-        # ftpServer = "192.168.1.130"
-        # ftpPort = 1021
+        """Download and parse the installation's device list."""
+        devices: dict[tuple[int, int], Device] = {}
+        file_data = io.BytesIO()
         try:
-            ftp = FTP()
-            ftp.connect(ftpServer, ftpPort)
-            ftp.login(self.user, self.pwd)
-            file_data = io.BytesIO()
-            ftp.retrbinary("RETR Instal.dat", file_data.write)
-            file_data.seek(0)
-            for idx, value in enumerate(file_data.read().decode("utf-8").splitlines()):
-                match idx % 8:
-                    case 0:
-                        newDevice = self.create_device(int(value))
-                        continue
-                    case 1:
-                        newDevice.name = self.get_device_name(value)
-                        continue
-                    case 2:
-                        newDevice.pos_x = int(value)
-                        continue
-                    case 3:
-                        newDevice.pos_y = int(value)
-                        continue
-                    case 4:
-                        newDevice.address = int(value)
-                        continue
-                    case 5:
-                        newDevice.output = int(value)
-                        newDevice.device_id = newDevice.output
-                        newDevice.device_unique_id = self.get_device_unique_id(
-                            newDevice.output
-                        )
-                        continue
-                    case 6:
-                        newDevice.type = int(value)
-                        continue
-                    case 7:
-                        newDevice.icon = int(value)
-                        devices.append(newDevice)
-                        continue
+            with FTP(timeout=CONNECT_TIMEOUT) as ftp:
+                ftp.connect("85.152.52.212", 21)
+                try:
+                    ftp.login(self.user, self.pwd)
+                except error_perm as err:
+                    if str(err).startswith("530"):
+                        raise APIAuthError("Installation FTP login rejected") from err
+                    raise
+                ftp.retrbinary("RETR Instal.dat", file_data.write)
+        except all_errors as err:
+            raise APIConnectionError("Could not download Instal.dat") from err
 
-            ftp.quit
-        except Exception as ex:
-            _LOGGER.error("Error reading file: %s", ex)
-        return devices
+        try:
+            lines = file_data.getvalue().decode("utf-8-sig").splitlines()
+            if not lines or len(lines) % 8:
+                raise ValueError("Expected complete eight-line device records")
+            installation_id = uuid4().hex
+            for offset in range(0, len(lines), 8):
+                map_id, name, x, y, address, output, device_type, icon = lines[
+                    offset : offset + 8
+                ]
+                if int(device_type) != 49 or int(output) == 9:
+                    continue
+                device = self.create_device(int(map_id))
+                device.name = self.get_device_name(name)
+                device.pos_x = int(x)
+                device.pos_y = int(y)
+                device.address = int(address)
+                device.output = device.device_id = int(output)
+                device.icon = int(icon)
+                if not device.has_valid_zone_address:
+                    raise ValueError("Thermostat address or output is out of range")
+                zone_id = f"{installation_id}_{device.address}_{device.device_id}"
+                device.device_unique_id = device.device_registry_id = zone_id
+                devices.setdefault((device.address, device.device_id), device)
+            if not devices:
+                raise ValueError("No supported thermostat zones found")
+
+        except ValueError as err:
+            raise APIConnectionError("Invalid Instal.dat device list") from err
+        return list(devices.values())
 
     def isValidMessage(self, message: bytes) -> bool:
         """Check if message is valid."""
@@ -250,10 +287,13 @@ class PushAPI(API):
         user: str,
         pwd: str,
         message_callback: Callable | None = None,
+        *,
+        destinations: set[int] | None = None,
     ) -> None:
         """Initialise."""
         super().__init__(host, user, pwd)
         self.message_callback = message_callback
+        self._destinations = frozenset({1} if destinations is None else destinations)
         self._task: asyncio.Task | None = None
         self._connect_task: asyncio.Task | None = None
         self._connect_lock = asyncio.Lock()
@@ -385,7 +425,7 @@ class PushAPI(API):
                     if self._stopping or self.socket is not sock:
                         break
                     _LOGGER.debug("Received valid message: %s", packet)
-                    if packet.dst == 1 and self.message_callback is not None:
+                    if packet.dst in self._destinations and self.message_callback is not None:
                         try:
                             await self.message_callback(packet)
                         except Exception:
