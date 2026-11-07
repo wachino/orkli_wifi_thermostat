@@ -1,6 +1,8 @@
 """Interfaces with the Example api sensors."""
 
+from dataclasses import dataclass
 import logging
+from math import isfinite
 
 from homeassistant.components.climate import (
     ClimateEntity,
@@ -13,8 +15,9 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .api import APIConnectionError, Device
 from .const import DOMAIN
@@ -43,6 +46,22 @@ async def async_setup_entry(
     async_add_entities(climateDevices)
 
 
+@dataclass
+class OrkliStoredTemperatures(ExtraStoredData):
+    """Store native temperatures independently of Home Assistant's display unit."""
+
+    current_temperature: float | None
+    target_temperature: float | None
+
+    def as_dict(self) -> dict[str, float | str | None]:
+        """Serialize the temperatures in Celsius."""
+        return {
+            "current_temperature": self.current_temperature,
+            "temperature": self.target_temperature,
+            "temperature_unit": UnitOfTemperature.CELSIUS,
+        }
+
+
 class ExampleClimate(CoordinatorEntity, ClimateEntity, RestoreEntity):
     """Implementation of a climate entity."""
 
@@ -61,14 +80,22 @@ class ExampleClimate(CoordinatorEntity, ClimateEntity, RestoreEntity):
         """Initialise sensor."""
         super().__init__(coordinator)
         self.device = device
-        self.device_id = device.device_id
 
     @callback
     def _handle_coordinator_update(self) -> None:
         """Update sensor with latest data from coordinator."""
         # This method is called by your DataUpdateCoordinator when a successful update runs.
-        self.device = self.coordinator.get_device_by_id(self.device_id)
+        device = self.coordinator.get_device_by_id(
+            self.device.device_id, self.device.address
+        )
+        if device is not None:
+            self.device = device
         self.async_write_ha_state()
+
+    @property
+    def available(self) -> bool:
+        """Report availability from both the connection and recent zone feedback."""
+        return super().available and self.coordinator.has_recent_feedback(self.device)
 
     @property
     def hvac_modes(self) -> list[HVACMode]:
@@ -84,6 +111,8 @@ class ExampleClimate(CoordinatorEntity, ClimateEntity, RestoreEntity):
     @property
     def hvac_mode(self) -> HVACMode | None:
         """Return the current operation mode."""
+        if self.device.on is None:
+            return None
         if not self.device.on:
             return HVACMode.OFF
         return self._device_hvac_mode
@@ -99,7 +128,7 @@ class ExampleClimate(CoordinatorEntity, ClimateEntity, RestoreEntity):
             identifiers={
                 (
                     DOMAIN,
-                    f"{self.coordinator.data.controller_name}-{self.device.device_id}",
+                    self.device.device_registry_id or self.device.device_unique_id,
                 )
             },
         )
@@ -167,37 +196,75 @@ class ExampleClimate(CoordinatorEntity, ClimateEntity, RestoreEntity):
         """Return the supported step of target temperature."""
         return 0.5
 
+    @property
+    def extra_restore_state_data(self) -> OrkliStoredTemperatures:
+        """Save the temperatures in the thermostat's native unit."""
+        return OrkliStoredTemperatures(
+            self.native_current_temperature, self.native_target_temperature
+        )
+
     async def async_added_to_hass(self):
         """Run when entity about to be added."""
         await super().async_added_to_hass()
 
-        # Check If we have an old state
+        stored_temperatures = await self.async_get_last_extra_data()
         previous_state = await self.async_get_last_state()
-        if previous_state is not None:
-            # Restore previous state
-            self.device.current_temperature = (
-                (162 - (previous_state.attributes.get("current_temperature") * 2))
-                if previous_state.attributes.get("current_temperature") is not None
-                else None
+        attributes = previous_state.attributes if previous_state is not None else {}
+        temperatures = (
+            stored_temperatures.as_dict()
+            if stored_temperatures is not None
+            else attributes
+        )
+        unit = temperatures.get("temperature_unit")
+        if unit is None:
+            # Older Home Assistant states omitted the display unit.
+            unit = self.hass.config.units.temperature_unit
+
+        if self.device.current_temperature is None:
+            current = self._restore_temperature(
+                temperatures.get("current_temperature"), unit
             )
-            self.device.current_humidity = (
-                (previous_state.attributes.get("current_humidity") * 2.55)
-                if previous_state.attributes.get("current_humidity") is not None
-                else None
+            if current is not None:
+                self.device.current_temperature = 162 - current * 2
+        if self.device.current_humidity is None:
+            humidity = attributes.get("current_humidity")
+            if humidity is not None:
+                self.device.current_humidity = humidity * 2.55
+        if self.device.target_temperature is None:
+            target = self._restore_temperature(temperatures.get("temperature"), unit)
+            if target is not None:
+                self.device.target_temperature = target * 2
+
+    def _restore_temperature(self, value: float | None, unit: str) -> float | None:
+        """Convert a saved temperature to the thermostat's native unit."""
+        if value is None or unit not in (
+            UnitOfTemperature.CELSIUS,
+            UnitOfTemperature.FAHRENHEIT,
+        ):
+            return None
+        try:
+            temperature = TemperatureConverter.convert(
+                float(value), unit, self.native_temperature_unit
             )
-            self.device.target_temperature = (
-                (previous_state.attributes.get("temperature") * 2)
-                if previous_state.attributes.get("temperature") is not None
-                else None
-            )
-            # Power and mode belong to coordinator data. A saved climate state
-            # may describe a different season or predate a live device update.
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return temperature if isfinite(temperature) else None
 
     async def async_set_temperature(self, **kwargs):
-        """Set new target temperature."""
-        await self.coordinator.async_send_temp_command(
-            self.device, kwargs.get("temperature")
+        """Send a setpoint and surface write failures as action errors."""
+        error = HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="target_temperature_failed",
+            translation_placeholders={"name": self.name},
         )
+        try:
+            sent = await self.coordinator.async_send_temp_command(
+                self.device, kwargs["temperature"]
+            )
+        except (APIConnectionError, OSError) as err:
+            raise error from err
+        if not sent:
+            raise error
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Enable or disable the zone without changing its heat/cool mode."""

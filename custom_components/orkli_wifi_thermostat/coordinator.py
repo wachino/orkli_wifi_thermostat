@@ -1,8 +1,10 @@
 """Example integration using DataUpdateCoordinator."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 import logging
+from time import monotonic
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -15,10 +17,27 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import APIAuthError, Device, Packet, PushAPI
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .api import APIConnectionError, Device, Packet, PushAPI, configured_devices
+from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, MIN_ZONE_FEEDBACK_TIMEOUT
 
 _LOGGER = logging.getLogger(__name__)
+
+FEEDBACK_FIELDS = ("power", "mode", "setpoint", "temperature", "humidity")
+
+
+@dataclass(slots=True)
+class FeedbackStats:
+    """Track the arrival of reports for one field since setup."""
+
+    last_seen: float
+    reports: int = 1
+    longest_gap: float | None = None
+
+    def record(self, received_at: float) -> None:
+        """Record a report even if its value did not change."""
+        self.longest_gap = max(self.longest_gap or 0, received_at - self.last_seen)
+        self.last_seen = received_at
+        self.reports += 1
 
 
 @dataclass
@@ -41,12 +60,21 @@ class OrkliCoordinator(DataUpdateCoordinator):
         self.host = config_entry.data[CONF_HOST]
         self.user = config_entry.data[CONF_USERNAME]
         self.pwd = config_entry.data[CONF_PASSWORD]
-        self.devices = [Device(**device) for device in config_entry.data[CONF_DEVICES]]
+        # Older entries saved discovery defaults for power and mode.
+        self.devices = configured_devices(
+            config_entry.data[CONF_DEVICES], self.host, config_entry.entry_id
+        )
+        for device in self.devices:
+            device.on = device.mode = None
 
         # set variables from options.  You need a default here incase options have not been set
         self.poll_interval = config_entry.options.get(
             CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
         )
+
+        self._feedback: dict[tuple[int, int], dict[str, FeedbackStats]] = {}
+        self._poll_batches_completed = 0
+        self._poll_batches_failed = 0
 
         # Initialise DataUpdateCoordinator
         super().__init__(
@@ -66,44 +94,103 @@ class OrkliCoordinator(DataUpdateCoordinator):
             user=self.user,
             pwd=self.pwd,
             message_callback=self.devices_update_callback,
+            destinations={device.address for device in self.devices},
         )
 
     async def devices_update_callback(self, packet: Packet):
         """Receive callback from api with device update."""
         _LOGGER.debug("Received packet: %s", packet)
-        devices = [
-            Device(
-                device_id=device.device_id,
-                device_unique_id=device.device_unique_id,
-                name=device.name,
-                map=device.map,
-                pos_x=device.pos_x,
-                pos_y=device.pos_y,
-                address=device.address,
-                output=device.device_id,
-                type=device.type,
-                icon=device.icon,
-                dato1=device.dato1,
-                dato2=device.dato2,
-                current_temperature=packet.data2
-                if packet.data1 == device.device_id * 4 + 3 and packet.data2 != 0
-                else device.current_temperature,
-                current_humidity=packet.data2
-                if packet.data1 == device.device_id + 100 and packet.data2 != 0
-                else device.current_humidity,
-                target_temperature=packet.data2
-                if packet.data1 == device.device_id * 4 + 2 and packet.data2 != 0
-                else device.target_temperature,
-                mode=(packet.data2 & 15) % 2
-                if packet.data1 == device.device_id * 4 + 1 and packet.data2 != 0
-                else device.mode,
-                on=packet.data2 == 3
-                if packet.data1 == device.device_id * 4 and packet.data2 != 0
-                else device.on,
+        if packet.cmd != 4:
+            return
+
+        devices = list(self.data.devices if self.data is not None else self.devices)
+        matched = False
+        received_at = monotonic()
+        for index, device in enumerate(devices):
+            if packet.dst != device.address:
+                continue
+
+            register = packet.data1 - device.device_id * 4
+            value = packet.data2
+            if register == 0:
+                field = "power"
+                devices[index] = replace(device, on=(value & 3) == 3)
+            elif register == 1:
+                field = "mode"
+                mode = value & 15
+                if mode in (1, 3, 5):
+                    devices[index] = replace(device, mode=1)
+                elif mode in (2, 4, 6):
+                    devices[index] = replace(device, mode=0)
+                else:
+                    devices[index] = replace(device, mode=None)
+            elif register == 2:
+                field = "setpoint"
+                devices[index] = replace(device, target_temperature=value)
+            elif register == 3 and value != 0:
+                field = "temperature"
+                devices[index] = replace(device, current_temperature=value)
+            elif packet.data1 == device.device_id + 100 and value != 0:
+                field = "humidity"
+                devices[index] = replace(device, current_humidity=value)
+            else:
+                continue
+            feedback = self._feedback.setdefault((device.address, device.device_id), {})
+            if (stats := feedback.get(field)) is None:
+                feedback[field] = FeedbackStats(received_at)
+            else:
+                stats.record(received_at)
+            matched = True
+
+        if matched:
+            self.async_set_updated_data(OrkliAPIData(self.api.controller_name, devices))
+
+    @property
+    def feedback_timeout(self) -> int:
+        """Return the effective zone feedback timeout in seconds."""
+        return max(MIN_ZONE_FEEDBACK_TIMEOUT, 3 * self.poll_interval)
+
+    def has_recent_feedback(self, device: Device) -> bool:
+        """Check whether any field for the zone has reported recently."""
+        feedback = self._feedback.get((device.address, device.device_id), {})
+        now = monotonic()
+        timeout = self.feedback_timeout
+        return any(now - stats.last_seen < timeout for stats in feedback.values())
+
+    def feedback_diagnostics(self) -> dict[str, Any]:
+        """Summarize per-zone packet timing without including private data."""
+        now = monotonic()
+        zones = []
+        for device in self.devices:
+            feedback = self._feedback.get((device.address, device.device_id), {})
+            fields = {}
+            for field in FEEDBACK_FIELDS:
+                stats = feedback.get(field)
+                fields[field] = {
+                    "reports": stats.reports if stats else 0,
+                    "seconds_since_last_report": round(now - stats.last_seen, 1)
+                    if stats
+                    else None,
+                    "longest_gap_seconds": round(stats.longest_gap, 1)
+                    if stats and stats.longest_gap is not None
+                    else None,
+                }
+            zones.append(
+                {
+                    "bus_address": device.address,
+                    "output": device.device_id,
+                    "fields": fields,
+                }
             )
-            for device in self.data.devices
-        ]
-        self.async_set_updated_data(OrkliAPIData(self.api.controller_name, devices))
+        return {
+            "connected": self.api.connected,
+            "last_update_success": self.last_update_success,
+            "scan_interval_seconds": self.poll_interval,
+            "zone_feedback_timeout_seconds": self.feedback_timeout,
+            "poll_batches_completed": self._poll_batches_completed,
+            "poll_batches_failed": self._poll_batches_failed,
+            "zones": zones,
+        }
 
     async def connect_api(self):
         """Connect to api."""
@@ -133,50 +220,60 @@ class OrkliCoordinator(DataUpdateCoordinator):
         cmd = self.create_packet(
             device.address, 255, 4, device.device_id * 4 + 2, int(temp * 2)
         )
-        return await self.async_send_command(cmd) and await self.async_send_command(
-            self.create_packet(device.address, 255, 4, device.device_id * 4 + 3, 0)
-        )
+        if not await self.async_send_command(cmd):
+            return False
+
+        try:
+            if not await self.async_send_read_command(device):
+                _LOGGER.debug("Could not request temperature feedback for %s", device.name)
+        except (APIConnectionError, OSError):
+            _LOGGER.debug("Follow-up temperature read failed", exc_info=True)
+        return True
 
     async def async_send_read_command(self, device: Device) -> bool:
         """Send a read command to a device."""
-        cmd = self.create_packet(device.address, 255, 4, device.device_id * 4 + 3, 0)
-        return await self.async_send_command(cmd)
+        return await self.async_send_command(self.create_read_packet(device))
+
+    def create_read_packet(self, device: Device) -> Packet:
+        """Build the existing zone telemetry request."""
+        return self.create_packet(device.address, 255, 4, device.device_id * 4 + 3, 0)
 
     async def async_send_command(self, command: Packet) -> bool:
         """Send command to device."""
         return await self.api.async_send_command(command)
 
-    async def async_update_data(self):
-        """Fetch data from API endpoint.
-
-        This is the place to pre-process the data to lookup tables
-        so entities can quickly look up their data.
-        """
+    async def async_update_data(self) -> OrkliAPIData:
+        """Request fresh telemetry and return the latest received state."""
+        devices = self.data.devices if self.data is not None else self.devices
+        if not devices:
+            raise UpdateFailed("No supported thermostat zones are configured")
         try:
             if not self.api.connected:
                 await self.connect_api()
-            # devices = await self.api.async_get_initial_devices()
-        except APIAuthError as err:
-            _LOGGER.error(err)
-            raise UpdateFailed(err) from err
-        except Exception as err:
-            # This will show entities as unavailable by raising UpdateFailed exception
+            connection = self.api.socket
+
+            for device in devices:
+                for packet in (
+                    self.create_packet(1, 254, 4, 35, 0),
+                    self.create_packet(1, 255, 10, 0, 0),
+                    self.create_packet(255, 255, 10, 0, 0),
+                    self.create_read_packet(device),
+                ):
+                    if not self.api.connected or self.api.socket is not connection:
+                        raise APIConnectionError("Connection changed during poll")
+                    if not await self.async_send_command(packet):
+                        raise APIConnectionError(
+                            f"Poll write failed for address {device.address}, "
+                            f"output {device.device_id}"
+                        )
+        except (APIConnectionError, OSError) as err:
+            self._poll_batches_failed += 1
             raise UpdateFailed(f"Error communicating with API: {err}") from err
 
-        devices = (
-            self.data.devices
-            if self.data is not None and self.data.devices is not None
-            else self.devices
-        )
-
-        for device in devices:
-            await self.async_send_command(self.create_packet(1, 254, 4, 35, 0))
-            await self.async_send_command(self.create_packet(1, 255, 10, 0, 0))
-            await self.async_send_command(self.create_packet(255, 255, 10, 0, 0))
-            await self.async_send_read_command(device)
-            # await asyncio.sleep(0.2)
-
-        # What is returned here is stored in self.data by the DataUpdateCoordinator
+        self._poll_batches_completed += 1
+        # Feedback may have arrived while the polling commands were being sent.
+        if self.data is not None:
+            return self.data
         return OrkliAPIData(self.api.controller_name, devices)
 
     async def async_shutdown(self) -> None:
@@ -184,15 +281,15 @@ class OrkliCoordinator(DataUpdateCoordinator):
         await super().async_shutdown()
         await self.disconnect_api()
 
-    def get_device_by_id(self, device_id: int) -> Device | None:
-        """Return device by device id."""
-        # Called by the binary sensors and sensors to get their updated data from self.data
-        try:
-            return [
-                device for device in self.data.devices if device.device_id == device_id
-            ][0]
-        except IndexError:
-            return None
+    def get_device_by_id(self, device_id: int, address: int) -> Device | None:
+        """Return a zone by its output and controller address."""
+        return next(
+            (
+                device for device in self.data.devices
+                if device.device_id == device_id and device.address == address
+            ),
+            None,
+        )
 
     def create_packet(
         self, dst: int, ori: int, cmd: int, data1: int, data2: int

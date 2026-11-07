@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from asyncio import CancelledError
 from collections.abc import Callable
 from dataclasses import dataclass
 import logging
@@ -10,7 +11,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import DOMAIN
 from .coordinator import OrkliCoordinator
@@ -24,7 +24,7 @@ PLATFORMS: list[Platform] = [Platform.CLIMATE]
 class RuntimeData:
     """Class to hold your data."""
 
-    coordinator: DataUpdateCoordinator
+    coordinator: OrkliCoordinator
     cancel_update_listener: Callable
 
 
@@ -37,13 +37,13 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> b
     # This is defined in coordinator.py
     coordinator = OrkliCoordinator(hass, config_entry)
 
-    # Perform an initial data load from api.
-    # async_config_entry_first_refresh() is special in that it does not log errors if it fails
-    await coordinator.async_config_entry_first_refresh()
-
-    # Test to see if api initialised correctly, else raise ConfigNotReady to make HA retry setup
-    if not coordinator.api.connected:
-        raise ConfigEntryNotReady
+    try:
+        await coordinator.async_config_entry_first_refresh()
+        if not coordinator.api.connected:
+            raise ConfigEntryNotReady
+    except (Exception, CancelledError):
+        await coordinator.async_shutdown()
+        raise
 
     # Initialise a listener for config flow options changes.
     # See config_flow for defining an options setting that shows up as configure on the integration.

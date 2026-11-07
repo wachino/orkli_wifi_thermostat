@@ -97,6 +97,18 @@ thermostat. The protocol bytes are unchanged. See
 [the TCP write review](docs/tcp-write-review.md) for cancellation, reconnect,
 and test details.
 
+### Feedback diagnostics
+
+In Home Assistant, open the Orkli integration entry's menu and select
+**Download diagnostics**. The report lists each zone by its BUSing address and
+output. For each field it shows the number of reports, the age of the last
+report, and the longest completed gap since the integration loaded. Identical
+reports count, and a field that has yet to report has no age. The report also
+counts complete and failed poll batches. A batch ends at the first failed
+write or connection change. Zone reports arrive separately from the writes.
+The integration report leaves out credentials, IP addresses, zone names,
+and readings.
+
 ---
 
 ## Contributing
