@@ -1,5 +1,8 @@
 {
   "exceptions": {
+    "target_temperature_failed": {
+      "message": "No se pudo enviar la temperatura objetivo para {name}."
+    },
     "zone_power_failed": {
       "message": "No se pudo enviar la orden de encendido o apagado de la zona {name}."
     },

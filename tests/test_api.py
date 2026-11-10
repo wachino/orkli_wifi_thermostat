@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import asyncio
 import errno
+from ftplib import error_perm
 import importlib.util
 from pathlib import Path
 import sys
@@ -27,6 +28,68 @@ OTHER_DESTINATION = bytes.fromhex("3b 02 ff 04 07 2a 36")
 PAYLOAD_HEADERS = bytes.fromhex("3b 01 ff 04 3b 3b 7a")
 CHECKSUM_HEADER = bytes.fromhex("3b 01 00 04 06 30 3b")
 BAD_CHECKSUM = TEMPERATURE[:-1] + b"\x00"
+
+
+class DiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.client = api.API("offline.invalid", "user", "password")
+        patcher = patch.object(api, "FTP")
+        self.ftp_factory = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.ftp = self.ftp_factory.return_value.__enter__.return_value
+
+    def set_file(self, contents):
+        self.ftp.retrbinary.side_effect = lambda command, write: write(contents)
+
+    def test_reads_complete_utf8_installation_records(self):
+        self.set_file("0\nSalón\n0\n0\n1\n2\n49\n11\n".encode())
+        device, = self.client.get_initial_devices()
+        self.assertEqual((device.address, device.device_id, device.type), (1, 2, 49))
+        self.ftp_factory.assert_called_once_with(timeout=api.CONNECT_TIMEOUT)
+        self.ftp_factory.return_value.__exit__.assert_called_once()
+
+    def test_rejects_empty_and_partial_installation_lists(self):
+        for contents in (b"", b"0\nLiving room\n"):
+            with self.subTest(contents=contents):
+                self.set_file(contents)
+                with self.assertRaises(api.APIConnectionError):
+                    self.client.get_initial_devices()
+
+    def test_discovery_filters_ventilation_and_distinguishes_addresses(self):
+        self.set_file(
+            b"0\nLiving\n0\n0\n1\n2\n49\n11\n"
+            b"0\nStudy\n0\n0\n2\n2\n49\n11\n"
+            b"1\nLiving duplicate\n0\n0\n1\n2\n49\n11\n"
+            b"0\nVent.\n0\n0\n1\n9\n49\n3\n"
+            b"0\nSwitch\n0\n0\n1\n0\n0\n0\n"
+        )
+        living, study = self.client.get_initial_devices()
+        self.assertEqual([(d.address, d.device_id) for d in (living, study)], [(1, 2), (2, 2)])
+        self.assertNotEqual(living.device_unique_id, study.device_unique_id)
+        self.assertNotEqual(living.device_registry_id, study.device_registry_id)
+
+    def test_discovery_rejects_addresses_and_outputs_outside_the_protocol(self):
+        for address, output in ((255, 2), (256, 2), (1, -1), (1, 64)):
+            with self.subTest(address=address, output=output):
+                self.set_file(f"0\nLiving\n0\n0\n{address}\n{output}\n49\n11\n".encode())
+                with self.assertRaises(api.APIConnectionError):
+                    self.client.get_initial_devices()
+
+    def test_saved_devices_recover_legacy_id_collisions(self):
+        first = self.client.create_device(0)
+        first.address = 1
+        second = {**vars(first), "address": 2}
+        devices = api.configured_devices([vars(first), second], self.client.host, "entry")
+        self.assertEqual(devices[0].device_unique_id, first.device_unique_id)
+        self.assertEqual(devices[0].device_registry_id, "offline_invalid-0")
+        self.assertEqual(devices[1].device_unique_id, "entry_2_0")
+        self.assertEqual(devices[1].device_registry_id, "entry_2_0")
+
+    def test_rejected_login_is_an_authentication_error(self):
+        self.ftp.login.side_effect = error_perm("530 Login incorrect")
+        with self.assertRaises(api.APIAuthError):
+            self.client.get_initial_devices()
+        self.ftp.retrbinary.assert_not_called()
 
 
 class LoopBudgetExceeded(BaseException):
